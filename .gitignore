@@ -1,0 +1,8 @@
+# Archivos de entorno
+.env
+
+# Claves de Google (por si acaso)
+*.json
+
+# Entorno virtual
+venv/
