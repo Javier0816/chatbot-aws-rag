@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chatbot RAG FastAPI</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f9;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .chat-container {
+            width: 90%;
+            max-width: 600px;
+            background: white;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            border-radius: 10px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            min-height: 500px;
+        }
+        header {
+            background-color: #007bff;
+            color: white;
+            padding: 15px;
+            text-align: center;
+            font-size: 1.2em;
+        }
+        #chatbox {
+            flex-grow: 1;
+            padding: 15px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .message {
+            max-width: 80%;
+            padding: 10px 15px;
+            border-radius: 18px;
+            line-height: 1.4;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background-color: #dcf8c6;
+            align-self: flex-end;
+            margin-left: 20%;
+        }
+        .bot-message {
+            background-color: #e9e9eb;
+            align-self: flex-start;
+            margin-right: 20%;
+        }
+        .input-area {
+            display: flex;
+            padding: 10px;
+            border-top: 1px solid #ddd;
+        }
+        #userInput {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 20px;
+            margin-right: 10px;
+            font-size: 1em;
+        }
+        #sendButton {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        #sendButton:hover {
+            background-color: #0056b3;
+        }
+        .loading-dots span {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #999;
+            margin: 0 2px;
+            animation: bounce 0.6s infinite alternate;
+        }
+        .loading-dots span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        .loading-dots span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+        @keyframes bounce {
+            from {
+                transform: translateY(0);
+            }
+            to {
+                transform: translateY(-8px);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <header>Chatbot RAG (Prueba Local)</header>
+        <div id="chatbox">
+            <div class="message bot-message">Hola! Soy el chatbot bancario. Pregúntame sobre los documentos que cargaste.</div>
+        </div>
+        <div class="input-area">
+            <input type="text" id="userInput" placeholder="Escribe tu pregunta..." required>
+            <button id="sendButton">Enviar</button>
+        </div>
+    </div>
+
+    <script>
+        // La URL de tu servidor FastAPI
+        // Nota: Si usas otra aplicación en el puerto 8000, cambia este valor
+        const API_URL = 'http://127.0.0.1:8000/chat'; 
+        const chatbox = document.getElementById('chatbox');
+        const userInput = document.getElementById('userInput');
+        const sendButton = document.getElementById('sendButton');
+
+        function appendMessage(sender, text) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}-message`;
+            messageDiv.textContent = text;
+            chatbox.appendChild(messageDiv);
+            chatbox.scrollTop = chatbox.scrollHeight; // Scroll automático
+            return messageDiv;
+        }
+
+        function showLoading() {
+            const loadingDiv = document.createElement('div');
+            loadingDiv.className = 'message bot-message loading-dots';
+            loadingDiv.innerHTML = '<span></span><span></span><span></span>';
+            chatbox.appendChild(loadingDiv);
+            chatbox.scrollTop = chatbox.scrollHeight;
+            return loadingDiv;
+        }
+
+        async function sendMessage() {
+            const query = userInput.value.trim();
+            if (!query) return;
+
+            // 1. Mostrar el mensaje del usuario
+            appendMessage('user', query);
+            userInput.value = ''; // Limpiar input
+            
+            // 2. Mostrar puntos de carga
+            const loadingIndicator = showLoading();
+
+            try {
+                // 3. Llamar a la API de FastAPI
+                const response = await fetch(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ query: query })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                
+                // 4. Eliminar el indicador de carga y mostrar la respuesta
+                chatbox.removeChild(loadingIndicator);
+                appendMessage('bot', data.response);
+
+            } catch (error) {
+                console.error('Error al obtener la respuesta del chatbot:', error);
+                chatbox.removeChild(loadingIndicator);
+                appendMessage('bot', 'Lo siento, hubo un error al conectar con el servidor.');
+            }
+        }
+
+        // Event Listeners
+        sendButton.addEventListener('click', sendMessage);
+        userInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        // Mensaje de bienvenida al cargar
+        window.onload = function() {
+            console.log("Interfaz de chat cargada. Asegúrate de que tu servidor FastAPI esté corriendo en 127.0.0.1:8000");
+        };
+    </script>
+</body>
+</html>
