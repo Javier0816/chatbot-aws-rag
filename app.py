@@ -11,26 +11,22 @@ from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.chains import RetrievalQA
 
-# --- Imports Telegram (MODERNIZADOS) ---
-# CAMBIO CRÍTICO: Usaremos solo 'Bot' y el resto de telegram.ext se manejará internamente
+# --- Imports Telegram ---
 from telegram import Bot
-# La nueva forma de importar manejadores y el ApplicationBuilder:
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters 
 
 # --- Imports para Servir HTML ---
 from fastapi.staticfiles import StaticFiles 
 from fastapi.responses import HTMLResponse
 
-
 # --- 1. CONFIGURACIÓN INICIAL Y CLAVES ---
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 telegram_token = os.getenv("TELEGRAM_TOKEN")
 
-# Asegúrate de que todas las claves de AWS y OpenAI estén en Render
 CHROMA_DB_PATH = "./chroma_db" 
 qa_chain = None 
-telegram_app = None # Usaremos una instancia de Application para manejar el bot
+telegram_app = None
 
 print("Inicializando el chatbot...")
 
@@ -38,11 +34,9 @@ print("Inicializando el chatbot...")
 try:
     if os.path.exists(CHROMA_DB_PATH):
         print("Base de datos persistida encontrada. Cargando...")
-        # NOTA: Asegúrate de que las variables de AWS S3 si aún las tienes, no causen problemas aquí
         embeddings = OpenAIEmbeddings(api_key=api_key)
         vectorstore = Chroma(persist_directory=CHROMA_DB_PATH, embedding_function=embeddings)
         
-        # CONFIGURACIÓN DEL LLM Y LA CADENA RAG
         llm = ChatOpenAI(model="gpt-3.5-turbo", api_key=api_key, temperature=0.5)
         retriever = vectorstore.as_retriever()
         qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, chain_type="stuff")
@@ -69,9 +63,9 @@ app.add_middleware(
 )
 
 
-# --- 4. CONFIGURACIÓN DE TELEGRAM (WEBHOOKS) ---
+# --- 4. CONFIGURACIÓN DE TELEGRAM ---
 
-# Los handlers de Telegram ahora reciben un argumento 'update' y 'context'
+# Handlers
 async def start_handler(update: object, context: object):
     """Maneja el comando /start"""
     if update.message:
@@ -85,8 +79,6 @@ async def message_handler(update: object, context: object):
 
     if update.message and update.message.text:
         query = update.message.text
-        # Señal de "escribiendo..."
-        # Usamos update.effective_chat para garantizar el ID del chat
         if update.effective_chat:
              await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
         
@@ -104,29 +96,20 @@ async def message_handler(update: object, context: object):
 
 @app.on_event("startup")
 async def startup_event():
-    """Inicializa el bot y el application al iniciar FastAPI"""
+    """Inicializa la Aplicación de Telegram, pero NO configura el webhook."""
     global telegram_app
     if not telegram_token:
         print("ERROR: TELEGRAM_TOKEN no está configurado. La funcionalidad de Telegram estará deshabilitada.")
         return
 
     print("Inicializando Telegram Bot Application...")
-    
-    # NUEVA SINTAXIS: Usamos ApplicationBuilder para crear la instancia del bot.
     telegram_app = ApplicationBuilder().token(telegram_token).build()
     
     # AÑADIR HANDLERS
     telegram_app.add_handler(CommandHandler("start", start_handler))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    
-    # Configura el webhook de Telegram
-    webhook_url = os.getenv("RENDER_EXTERNAL_URL") or "https://chatbot-aws-rag-2.onrender.com/"
-    
-    full_webhook_url = f"{webhook_url}telegram"
-    # Esto es crucial: asegura que la URL de Render sea la que recibe los mensajes
-    await telegram_app.bot.set_webhook(full_webhook_url) 
-    print(f"Webhook de Telegram configurado en: {full_webhook_url}")
-    
+    # NOTA: El webhook NO se configura aquí.
+    print("Telegram Application inicializada. Use el endpoint /set_telegram_webhook para activarla.")
 
 
 @app.post("/telegram")
@@ -143,6 +126,28 @@ async def telegram_webhook(request: Request):
     
     # Responde 200 OK inmediatamente
     return {"status": "ok"}
+
+
+@app.get("/set_telegram_webhook")
+async def set_webhook():
+    """Endpoint para configurar manualmente el webhook después de que el servidor esté LIVE."""
+    if not telegram_token or not telegram_app:
+        return {"status": "error", "message": "Falta el token de Telegram o la aplicación no está inicializada."}
+        
+    try:
+        # Usa Render's external URL, si no está disponible, usa la URL estática
+        webhook_url = os.getenv("RENDER_EXTERNAL_URL") or "https://chatbot-aws-rag-2.onrender.com/"
+        full_webhook_url = f"{webhook_url}telegram"
+        
+        await telegram_app.bot.set_webhook(full_webhook_url) 
+        
+        return {
+            "status": "success",
+            "message": "Webhook de Telegram configurado exitosamente.",
+            "url_configurada": full_webhook_url
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Fallo al configurar el webhook: {e}"}
 
 
 # --- 5. ENDPOINT PARA LA INTERFAZ WEB (HTML) ---
