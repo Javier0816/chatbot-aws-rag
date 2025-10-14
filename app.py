@@ -11,9 +11,11 @@ from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.chains import RetrievalQA
 
-# --- Imports Telegram (NUEVOS) ---
-from telegram import Bot, Update
-from telegram.ext import Dispatcher, MessageHandler, filters
+# --- Imports Telegram (MODERNIZADOS) ---
+# CAMBIO CRÍTICO: Usaremos solo 'Bot' y el resto de telegram.ext se manejará internamente
+from telegram import Bot
+# La nueva forma de importar manejadores y el ApplicationBuilder:
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters 
 
 # --- Imports para Servir HTML ---
 from fastapi.staticfiles import StaticFiles 
@@ -23,13 +25,12 @@ from fastapi.responses import HTMLResponse
 # --- 1. CONFIGURACIÓN INICIAL Y CLAVES ---
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
-telegram_token = os.getenv("TELEGRAM_TOKEN") # ¡Nueva variable!
+telegram_token = os.getenv("TELEGRAM_TOKEN")
 
 # Asegúrate de que todas las claves de AWS y OpenAI estén en Render
 CHROMA_DB_PATH = "./chroma_db" 
 qa_chain = None 
-bot = None
-dispatcher = None
+telegram_app = None # Usaremos una instancia de Application para manejar el bot
 
 print("Inicializando el chatbot...")
 
@@ -37,6 +38,7 @@ print("Inicializando el chatbot...")
 try:
     if os.path.exists(CHROMA_DB_PATH):
         print("Base de datos persistida encontrada. Cargando...")
+        # NOTA: Asegúrate de que las variables de AWS S3 si aún las tienes, no causen problemas aquí
         embeddings = OpenAIEmbeddings(api_key=api_key)
         vectorstore = Chroma(persist_directory=CHROMA_DB_PATH, embedding_function=embeddings)
         
@@ -69,12 +71,13 @@ app.add_middleware(
 
 # --- 4. CONFIGURACIÓN DE TELEGRAM (WEBHOOKS) ---
 
-async def start_handler(update, context):
+# Los handlers de Telegram ahora reciben un argumento 'update' y 'context'
+async def start_handler(update: object, context: object):
     """Maneja el comando /start"""
     if update.message:
         await update.message.reply_text("¡Hola! Soy tu Chatbot RAG empresarial. Envíame una pregunta para comenzar.")
 
-async def message_handler(update, context):
+async def message_handler(update: object, context: object):
     """Maneja los mensajes de texto y usa el RAG para responder"""
     if not qa_chain:
         await update.message.reply_text("Error: El sistema RAG no está inicializado.")
@@ -83,7 +86,10 @@ async def message_handler(update, context):
     if update.message and update.message.text:
         query = update.message.text
         # Señal de "escribiendo..."
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+        # Usamos update.effective_chat para garantizar el ID del chat
+        if update.effective_chat:
+             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
+        
         print(f"Pregunta de Telegram recibida: {query}")
         
         try:
@@ -98,39 +104,42 @@ async def message_handler(update, context):
 
 @app.on_event("startup")
 async def startup_event():
-    """Inicializa el bot y el dispatcher al iniciar FastAPI"""
-    global bot, dispatcher
+    """Inicializa el bot y el application al iniciar FastAPI"""
+    global telegram_app
     if not telegram_token:
-        print("ERROR: TELEGRAM_TOKEN no está configurado.")
+        print("ERROR: TELEGRAM_TOKEN no está configurado. La funcionalidad de Telegram estará deshabilitada.")
         return
 
-    print("Inicializando Telegram Bot...")
-    bot = Bot(telegram_token)
+    print("Inicializando Telegram Bot Application...")
     
-    dispatcher = Dispatcher(bot, update_queue=None, use_context=True)
-    dispatcher.add_handler(MessageHandler(filters.COMMAND, start_handler))
-    dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    # NUEVA SINTAXIS: Usamos ApplicationBuilder para crear la instancia del bot.
+    telegram_app = ApplicationBuilder().token(telegram_token).build()
+    
+    # AÑADIR HANDLERS
+    telegram_app.add_handler(CommandHandler("start", start_handler))
+    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
     # Configura el webhook de Telegram
-    webhook_url = os.getenv("RENDER_EXTERNAL_URL")
-    if webhook_url:
-        full_webhook_url = f"{webhook_url}telegram"
-        # Esto es crucial: asegura que la URL de Render sea la que recibe los mensajes
-        await bot.set_webhook(full_webhook_url) 
-        print(f"Webhook de Telegram configurado en: {full_webhook_url}")
-    else:
-        print("ADVERTENCIA: RENDER_EXTERNAL_URL no está disponible. El webhook NO se configuró.")
+    webhook_url = os.getenv("RENDER_EXTERNAL_URL") or "https://chatbot-aws-rag-2.onrender.com/"
+    
+    full_webhook_url = f"{webhook_url}telegram"
+    # Esto es crucial: asegura que la URL de Render sea la que recibe los mensajes
+    await telegram_app.bot.set_webhook(full_webhook_url) 
+    print(f"Webhook de Telegram configurado en: {full_webhook_url}")
+    
 
 
 @app.post("/telegram")
 async def telegram_webhook(request: Request):
     """Endpoint que recibe todas las actualizaciones de Telegram"""
-    if not dispatcher:
-        return {"status": "error", "message": "Dispatcher no inicializado"}
+    if not telegram_app:
+        return {"status": "error", "message": "Telegram Application no inicializada"}
 
     body = await request.json()
-    update = Update.de_json(body, bot)
-    dispatcher.process_update(update)
+    
+    # Procesar la actualización con el Application
+    update = telegram_app.update_class.de_json(body, telegram_app.bot)
+    await telegram_app.process_update(update)
     
     # Responde 200 OK inmediatamente
     return {"status": "ok"}
@@ -155,8 +164,6 @@ async def get_chatbot_response(message: Message):
 
 
 # --- 6. SERVIR ARCHIVOS ESTÁTICOS (DEBE IR AL FINAL) ---
-# Montamos la carpeta 'static' en la raíz (/). 
-# Solo se usará si el servidor no encuentra las rutas /chat o /telegram.
 if not os.path.exists("static"):
     os.makedirs("static")
     
