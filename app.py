@@ -2,7 +2,7 @@ import os
 import json
 from dotenv import load_dotenv
 from typing import Dict
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -80,6 +80,7 @@ async def message_handler(update: object, context: object):
     if update.message and update.message.text:
         query = update.message.text
         if update.effective_chat:
+             # Señal de "escribiendo..." mientras RAG busca la respuesta
              await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
         
         print(f"Pregunta de Telegram recibida: {query}")
@@ -92,6 +93,22 @@ async def message_handler(update: object, context: object):
         except Exception as e:
             print(f"Error al procesar la consulta RAG: {e}")
             await update.message.reply_text("Lo siento, hubo un error interno al buscar la información.")
+
+
+# --- Funciones y Endpoints de Telegram ---
+
+async def handle_telegram_update(body: Dict):
+    """Función que maneja la actualización de Telegram en segundo plano."""
+    if not telegram_app:
+        print("Error: telegram_app no inicializada en el background.")
+        return
+
+    try:
+        # Procesar la actualización
+        update = telegram_app.update_class.de_json(body, telegram_app.bot)
+        await telegram_app.process_update(update)
+    except Exception as e:
+        print(f"Error procesando actualización de Telegram en background: {e}")
 
 
 @app.on_event("startup")
@@ -108,23 +125,27 @@ async def startup_event():
     # AÑADIR HANDLERS
     telegram_app.add_handler(CommandHandler("start", start_handler))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    # NOTA: El webhook NO se configura aquí.
+    
     print("Telegram Application inicializada. Use el endpoint /set_telegram_webhook para activarla.")
 
 
 @app.post("/telegram")
-async def telegram_webhook(request: Request):
-    """Endpoint que recibe todas las actualizaciones de Telegram"""
+async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
+    """
+    Endpoint que recibe todas las actualizaciones de Telegram.
+    Usa BackgroundTasks para responder 200 OK inmediatamente.
+    """
     if not telegram_app:
         return {"status": "error", "message": "Telegram Application no inicializada"}
 
+    # 1. Leer el cuerpo de la petición
     body = await request.json()
     
-    # Procesar la actualización con el Application
-    update = telegram_app.update_class.de_json(body, telegram_app.bot)
-    await telegram_app.process_update(update)
+    # 2. Agregar el procesamiento a las tareas de fondo.
+    # Esto garantiza que devolvemos la respuesta 200 a Telegram de inmediato.
+    background_tasks.add_task(handle_telegram_update, body)
     
-    # Responde 200 OK inmediatamente
+    # 3. Respuesta 200 OK inmediata
     return {"status": "ok"}
 
 
@@ -139,7 +160,8 @@ async def set_webhook():
         webhook_url = os.getenv("RENDER_EXTERNAL_URL") or "https://chatbot-aws-rag-2.onrender.com/"
         full_webhook_url = f"{webhook_url}telegram"
         
-        await telegram_app.bot.set_webhook(full_webhook_url) 
+        # El timeout es para forzar una espera en entornos con problemas de DNS
+        await telegram_app.bot.set_webhook(full_webhook_url, read_timeout=10, write_timeout=10) 
         
         return {
             "status": "success",
