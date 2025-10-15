@@ -34,6 +34,7 @@ print("Inicializando el chatbot...")
 try:
     if os.path.exists(CHROMA_DB_PATH):
         print("Base de datos persistida encontrada. Cargando...")
+        # Usa el token de OpenAI para la incrustación
         embeddings = OpenAIEmbeddings(api_key=api_key)
         vectorstore = Chroma(persist_directory=CHROMA_DB_PATH, embedding_function=embeddings)
         
@@ -86,6 +87,7 @@ async def message_handler(update: object, context: object):
         print(f"Pregunta de Telegram recibida: {query}")
         
         try:
+            # Llama a la cadena RAG para obtener la respuesta
             response = qa_chain.invoke({'query': query})
             final_response = response.get('result', 'Lo siento, no pude encontrar una respuesta relevante.')
             await update.message.reply_text(final_response)
@@ -98,16 +100,20 @@ async def message_handler(update: object, context: object):
 # --- Funciones y Endpoints de Telegram ---
 
 async def handle_telegram_update(body: Dict):
-    """Función que maneja la actualización de Telegram en segundo plano."""
+    """
+    Función que maneja la actualización de Telegram en segundo plano.
+    (CORRECCIÓN CRÍTICA: Usa process_update(body) directamente)
+    """
     if not telegram_app:
         print("Error: telegram_app no inicializada en el background.")
         return
 
     try:
-        # Procesar la actualización
-        update = telegram_app.update_class.de_json(body, telegram_app.bot)
-        await telegram_app.process_update(update)
+        # El método process_update puede tomar el JSON (el 'body') directamente
+        # Esto resuelve el error de atributo que veíamos en los logs
+        await telegram_app.process_update(body) 
     except Exception as e:
+        # Esto captura cualquier otro error en el procesamiento
         print(f"Error procesando actualización de Telegram en background: {e}")
 
 
@@ -138,7 +144,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     if not telegram_app:
         return {"status": "error", "message": "Telegram Application no inicializada"}
 
-    # 1. Leer el cuerpo de la petición
+    # 1. Leer el cuerpo de la petición (el JSON de Telegram)
     body = await request.json()
     
     # 2. Agregar el procesamiento a las tareas de fondo.
