@@ -102,7 +102,6 @@ async def message_handler(update: object, context: object):
 async def handle_telegram_update(body: Dict):
     """
     Función que maneja la actualización de Telegram en segundo plano.
-    (CORRECCIÓN CRÍTICA: Usa process_update(body) directamente)
     """
     if not telegram_app:
         print("Error: telegram_app no inicializada en el background.")
@@ -110,16 +109,15 @@ async def handle_telegram_update(body: Dict):
 
     try:
         # El método process_update puede tomar el JSON (el 'body') directamente
-        # Esto resuelve el error de atributo que veíamos en los logs
         await telegram_app.process_update(body) 
     except Exception as e:
-        # Esto captura cualquier otro error en el procesamiento
+        # Captura el error que acabamos de corregir para que no se propague
         print(f"Error procesando actualización de Telegram en background: {e}")
 
 
 @app.on_event("startup")
 async def startup_event():
-    """Inicializa la Aplicación de Telegram, pero NO configura el webhook."""
+    """Inicializa la Aplicación de Telegram, e incluye el paso de inicialización faltante."""
     global telegram_app
     if not telegram_token:
         print("ERROR: TELEGRAM_TOKEN no está configurado. La funcionalidad de Telegram estará deshabilitada.")
@@ -128,6 +126,15 @@ async def startup_event():
     print("Inicializando Telegram Bot Application...")
     telegram_app = ApplicationBuilder().token(telegram_token).build()
     
+    # *** CORRECCIÓN CRÍTICA: Inicializar el Bot para procesar actualizaciones JSON ***
+    # Esto resuelve el error: "Application was not initialized via Application.initialize!"
+    try:
+        await telegram_app.initialize()
+    except Exception as e:
+        # Este error puede ocurrir si se llama dos veces, pero es necesario aquí.
+        print(f"Advertencia al inicializar App: {e}")
+
+
     # AÑADIR HANDLERS
     telegram_app.add_handler(CommandHandler("start", start_handler))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
@@ -148,7 +155,6 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     body = await request.json()
     
     # 2. Agregar el procesamiento a las tareas de fondo.
-    # Esto garantiza que devolvemos la respuesta 200 a Telegram de inmediato.
     background_tasks.add_task(handle_telegram_update, body)
     
     # 3. Respuesta 200 OK inmediata
@@ -162,11 +168,9 @@ async def set_webhook():
         return {"status": "error", "message": "Falta el token de Telegram o la aplicación no está inicializada."}
         
     try:
-        # Usa Render's external URL, si no está disponible, usa la URL estática
         webhook_url = os.getenv("RENDER_EXTERNAL_URL") or "https://chatbot-aws-rag-2.onrender.com/"
         full_webhook_url = f"{webhook_url}telegram"
         
-        # El timeout es para forzar una espera en entornos con problemas de DNS
         await telegram_app.bot.set_webhook(full_webhook_url, read_timeout=10, write_timeout=10) 
         
         return {
