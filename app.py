@@ -13,7 +13,7 @@ from langchain.chains import RetrievalQA
 
 # --- Imports Telegram ---
 from telegram import Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters 
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, Application
 
 # --- Imports para Servir HTML ---
 from fastapi.staticfiles import StaticFiles 
@@ -26,7 +26,8 @@ telegram_token = os.getenv("TELEGRAM_TOKEN")
 
 CHROMA_DB_PATH = "./chroma_db" 
 qa_chain = None 
-telegram_app = None
+telegram_app: Application = None # Definimos el tipo como Application
+global_bot: Bot = None # Almacenamos el objeto Bot para la activación
 
 print("Inicializando el chatbot...")
 
@@ -34,7 +35,6 @@ print("Inicializando el chatbot...")
 try:
     if os.path.exists(CHROMA_DB_PATH):
         print("Base de datos persistida encontrada. Cargando...")
-        # Usa el token de OpenAI para la incrustación
         embeddings = OpenAIEmbeddings(api_key=api_key)
         vectorstore = Chroma(persist_directory=CHROMA_DB_PATH, embedding_function=embeddings)
         
@@ -66,7 +66,7 @@ app.add_middleware(
 
 # --- 4. CONFIGURACIÓN DE TELEGRAM ---
 
-# Handlers
+# Handlers (Sin cambios en la lógica, solo en la inicialización)
 async def start_handler(update: object, context: object):
     """Maneja el comando /start"""
     if update.message:
@@ -81,13 +81,12 @@ async def message_handler(update: object, context: object):
     if update.message and update.message.text:
         query = update.message.text
         if update.effective_chat:
-             # Señal de "escribiendo..." mientras RAG busca la respuesta
+             # Señal de "escribiendo..."
              await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
         
         print(f"Pregunta de Telegram recibida: {query}")
         
         try:
-            # Llama a la cadena RAG para obtener la respuesta
             response = qa_chain.invoke({'query': query})
             final_response = response.get('result', 'Lo siento, no pude encontrar una respuesta relevante.')
             await update.message.reply_text(final_response)
@@ -102,44 +101,46 @@ async def message_handler(update: object, context: object):
 async def handle_telegram_update(body: Dict):
     """
     Función que maneja la actualización de Telegram en segundo plano.
+    Incluye toda la inicialización dentro de la tarea de fondo para asegurar
+    que la Application tenga un estado fresco y válido, resolviendo el error.
     """
-    if not telegram_app:
-        print("Error: telegram_app no inicializada en el background.")
+    if not telegram_token:
+        print("Error: TELEGRAM_TOKEN no está disponible.")
         return
 
+    # 1. INICIALIZACIÓN COMPLETA DENTRO DEL BACKGROUND TASK
+    # Esto asegura que la App está activa cuando se llama a process_update
     try:
-        # El método process_update puede tomar el JSON (el 'body') directamente
-        await telegram_app.process_update(body) 
+        app_builder = ApplicationBuilder().token(telegram_token)
+        local_telegram_app = app_builder.build()
+        
+        # Agregar handlers
+        local_telegram_app.add_handler(CommandHandler("start", start_handler))
+        local_telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+        # 2. Inicialización Asíncrona
+        await local_telegram_app.initialize()
+
+        # 3. Procesar la actualización
+        await local_telegram_app.process_update(body)
+
     except Exception as e:
-        # Captura el error que acabamos de corregir para que no se propague
-        print(f"Error procesando actualización de Telegram en background: {e}")
+        print(f"CRITICAL ERROR - Fallo irrecuperable en background task: {e}")
 
 
 @app.on_event("startup")
 async def startup_event():
-    """Inicializa la Aplicación de Telegram, e incluye el paso de inicialización faltante."""
-    global telegram_app
+    """Inicializa la ApplicationBuilder y el objeto Bot."""
+    global global_bot, telegram_app
     if not telegram_token:
-        print("ERROR: TELEGRAM_TOKEN no está configurado. La funcionalidad de Telegram estará deshabilitada.")
+        print("ERROR: TELEGRAM_TOKEN no está configurado.")
         return
-
-    print("Inicializando Telegram Bot Application...")
+    
+    # Solo necesitamos construir el objeto Application una vez para fines de activación
     telegram_app = ApplicationBuilder().token(telegram_token).build()
+    global_bot = telegram_app.bot
     
-    # *** CORRECCIÓN CRÍTICA: Inicializar el Bot para procesar actualizaciones JSON ***
-    # Esto resuelve el error: "Application was not initialized via Application.initialize!"
-    try:
-        await telegram_app.initialize()
-    except Exception as e:
-        # Este error puede ocurrir si se llama dos veces, pero es necesario aquí.
-        print(f"Advertencia al inicializar App: {e}")
-
-
-    # AÑADIR HANDLERS
-    telegram_app.add_handler(CommandHandler("start", start_handler))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    
-    print("Telegram Application inicializada. Use el endpoint /set_telegram_webhook para activarla.")
+    print("Telegram Bot Application inicializada para activación.")
 
 
 @app.post("/telegram")
@@ -148,13 +149,11 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     Endpoint que recibe todas las actualizaciones de Telegram.
     Usa BackgroundTasks para responder 200 OK inmediatamente.
     """
-    if not telegram_app:
-        return {"status": "error", "message": "Telegram Application no inicializada"}
-
     # 1. Leer el cuerpo de la petición (el JSON de Telegram)
     body = await request.json()
     
     # 2. Agregar el procesamiento a las tareas de fondo.
+    # El procesamiento completo del bot ocurre en la tarea de fondo
     background_tasks.add_task(handle_telegram_update, body)
     
     # 3. Respuesta 200 OK inmediata
@@ -164,14 +163,15 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
 @app.get("/set_telegram_webhook")
 async def set_webhook():
     """Endpoint para configurar manualmente el webhook después de que el servidor esté LIVE."""
-    if not telegram_token or not telegram_app:
-        return {"status": "error", "message": "Falta el token de Telegram o la aplicación no está inicializada."}
+    if not telegram_token or not global_bot:
+        return {"status": "error", "message": "Falta el token de Telegram o el bot no está inicializado."}
         
     try:
         webhook_url = os.getenv("RENDER_EXTERNAL_URL") or "https://chatbot-aws-rag-2.onrender.com/"
         full_webhook_url = f"{webhook_url}telegram"
         
-        await telegram_app.bot.set_webhook(full_webhook_url, read_timeout=10, write_timeout=10) 
+        # Usamos el objeto global_bot para hacer la activación
+        await global_bot.set_webhook(full_webhook_url, read_timeout=10, write_timeout=10) 
         
         return {
             "status": "success",
